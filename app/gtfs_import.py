@@ -10,6 +10,7 @@ feeds diferentes não colidam. Reimportar a mesma fonte substitui os dados dela.
 
 import csv
 import io
+import sys
 import zipfile
 from collections import defaultdict
 
@@ -229,10 +230,7 @@ def importar(fonte: str, caminho: str):
 
 
 if __name__ == "__main__":
-    # if len(sys.argv) != 3:
-    #     sys.exit(__doc__)
-
-    # importar(sys.argv[1], sys.argv[2])
-
-    importar("sptrans", "../gtfs/sptrans_gtfs.zip")
-    importar("artesp", "../gtfs/artesp_gtfs.zip")
+    if len(sys.argv) != 3:
+        sys.exit(__doc__)
+    
+    importar(sys.argv[1], sys.argv[2])
