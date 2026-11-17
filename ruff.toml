@@ -1,0 +1,4 @@
+[lint.per-file-ignores]
+"app/routers/*" = ["B008"]
+"live.py" = ["BLE001"]
+"security.py" = ["BLE001", "B008"]

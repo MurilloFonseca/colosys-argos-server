@@ -1,0 +1,21 @@
+[project]
+name = "colosys-argos-server"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "bcrypt>=5.0.0",
+    "fastapi[standard]>=0.163.1",
+    "httpx>=0.28.1",
+    "pydantic-settings>=2.16.3",
+    "pydantic[email]>=2.14.3",
+    "pyjwt>=2.15.1",
+    "pymongo>=4.20.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "tzdata>=2026.6",
+]
