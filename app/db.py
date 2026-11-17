@@ -11,8 +11,10 @@ async def criar_indices() -> None:
     await db.linhas.create_index("busca")
     await db.linhas.create_index([("tipo", 1), ("numero", 1)])
     await db.paradas.create_index("busca")
-    await db.horarios.create_index([("stop_id", 1), ("saida_s", 1)])
-    await db.horarios.create_index("trip_id")
+    await db.padroes.create_index("route_id")
+    await db.padroes.create_index("paradas")
+    await db.regras_tarifa.create_index("route_id")
+    await db.regras_tarifa.create_index("fare_id")
     await db.favoritos.create_index("usuario_id")
     await db.favoritos.create_index(
         [("usuario_id", 1), ("linha_id", 1)],

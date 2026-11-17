@@ -6,6 +6,10 @@ Ex.:  python -m app.gtfs_import sptrans gtfs_sptrans.zip
 
 `fonte` é só um rótulo: vira prefixo dos ids (ex.: "sptrans:3766-10") para que
 feeds diferentes não colidam. Reimportar a mesma fonte substitui os dados dela.
+
+NÃO guardamos horários (stop_times). Em vez disso, cada linha vira "padrões":
+a sequência de paradas de um sentido + minutos médios desde a 1ª parada.
+Milhares de viagens iguais viram um único documento.
 """
 
 import csv
@@ -33,7 +37,7 @@ def tipo_linha(route_type: str) -> str:
     return "Trem" if 100 <= t < 200 else "Metrô" if 400 <= t < 500 else "Ônibus"
 
 
-def segundos(hora: str):
+def segundos(hora):
     if not hora or not hora.strip():
         return None
     h, m, s = hora.strip().split(":")
@@ -55,19 +59,101 @@ def inserir_em_lotes(colecao, docs, nome):
             colecao.insert_many(lote, ordered=False)
             total += len(lote)
             lote = []
-            if total % 500_000 == 0:
-                print(f"  {nome}: {total:,}")
     if lote:
         colecao.insert_many(lote, ordered=False)
         total += len(lote)
     print(f"  {nome}: {total:,}")
 
 
+# --------------------------------------------------------------- padrões
+class NaoAgrupado(Exception):
+    pass
+
+
+def agrupa_sequencial(linhas):
+    """Agrupa stop_times por viagem lendo em sequência (usa pouca memória).
+    Exige o arquivo agrupado por trip_id, o que é o comum em GTFS."""
+    atual, buf, vistas = None, [], set()
+    for r in linhas:
+        t = r["trip_id"]
+        if t != atual:
+            if buf:
+                yield atual, buf
+                vistas.add(atual)
+            if t in vistas:
+                raise NaoAgrupado
+            atual, buf = t, []
+        buf.append(r)
+    if buf:
+        yield atual, buf
+
+
+def agrupa_em_memoria(linhas):
+    grupos = defaultdict(list)
+    for r in linhas:
+        grupos[r["trip_id"]].append(r)
+    yield from grupos.items()
+
+
+def tempos_da_viagem(rs):
+    """Lista de tempos (s) por parada, preenchendo buracos (paradas sem horário)."""
+    ts = []
+    for r in rs:
+        t = segundos(r.get("arrival_time"))
+        ts.append(t if t is not None else segundos(r.get("departure_time")))
+    conhecidos = [t for t in ts if t is not None]
+    if not conhecidos:
+        return None
+    ultimo = conhecidos[0]
+    for i, t in enumerate(ts):
+        ts[i] = ultimo = t if t is not None else ultimo
+    return ts
+
+
+def monta_padroes(z, info_viagem, p):
+    """{(route_id, sentido, paradas): {...}} somando minutos de todas as viagens iguais."""
+    for agrupador in (agrupa_sequencial, agrupa_em_memoria):
+        acum = {}
+        try:
+            for trip_id, rs in agrupador(ler(z, "stop_times.txt")):
+                info = info_viagem.get(trip_id)
+                if not info:
+                    continue
+                rs.sort(key=lambda r: int(r["stop_sequence"]))
+                ts = tempos_da_viagem(rs)
+                if not ts:
+                    continue
+                paradas = tuple(p(r["stop_id"]) for r in rs)
+                offsets = [t - ts[0] for t in ts]
+                chave = (info["route_id"], info["sentido"], paradas)
+                a = acum.get(chave)
+                if a is None:
+                    acum[chave] = {
+                        "n": 1,
+                        "soma": offsets,
+                        "destino": info["destino"],
+                        "shape_id": info["shape_id"],
+                    }
+                else:
+                    a["n"] += 1
+                    a["soma"] = [x + y for x, y in zip(a["soma"], offsets)]
+            return acum
+        except NaoAgrupado:
+            print(
+                "  stop_times.txt não está agrupado por viagem; usando modo em memória (mais lento)..."
+            )
+    return {}
+
+
+# ------------------------------------------------------------- importação
 def importar(fonte: str, caminho: str):
     db = MongoClient(settings.mongo_url)[settings.mongo_db]
     p = lambda i: f"{fonte}:{i}"  # prefixo
 
-    for nome in ("linhas", "paradas", "viagens", "horarios", "shapes", "calendarios"):
+    # Coleções de versões anteriores (guardavam horários): não são mais usadas.
+    for antiga in ("horarios", "viagens", "calendarios"):
+        db.drop_collection(antiga)
+    for nome in ("linhas", "paradas", "padroes", "shapes", "tarifas", "regras_tarifa"):
         db[nome].delete_many({"fonte": fonte})
 
     with zipfile.ZipFile(caminho) as z:
@@ -117,82 +203,38 @@ def importar(fonte: str, caminho: str):
                     "lat": lat,
                     "lon": lon,
                     "estacao": r.get("location_type") == "1",
+                    "zona": r.get("zone_id") or None,  # usado pelas regras de tarifa
                     "busca": normaliza(r.get("stop_name", "")),
                 }
 
         inserir_em_lotes(db.paradas, paradas(), "paradas")
 
-        print("calendário...")
-        cals = [
-            {
-                "_id": p(r["service_id"]),
-                "fonte": fonte,
-                "inicio": r["start_date"],
-                "fim": r["end_date"],
-                "dias": [
-                    r[d] == "1"
-                    for d in (
-                        "monday",
-                        "tuesday",
-                        "wednesday",
-                        "thursday",
-                        "friday",
-                        "saturday",
-                        "sunday",
-                    )
-                ],
+        print("padrões de viagem (a partir de stop_times)... pode demorar")
+        info_viagem = {
+            r["trip_id"]: {
+                "route_id": p(r["route_id"]),
+                "sentido": r.get("direction_id", ""),
+                "destino": r.get("trip_headsign", ""),
+                "shape_id": p(r["shape_id"]) if r.get("shape_id") else None,
             }
-            for r in ler(z, "calendar.txt")
-        ]
-        if cals:
-            db.calendarios.insert_many(cals)
-        # Sem calendar.txt, service_id fica None e a viagem vale todos os dias.
-        usa_calendario = bool(cals)
-
-        print("viagens...")
-        info_viagem = {}
-
-        def viagens():
-            for r in ler(z, "trips.txt"):
-                servico = p(r["service_id"]) if usa_calendario else None
-                info_viagem[r["trip_id"]] = (p(r["route_id"]), servico)
-                yield {
-                    "_id": p(r["trip_id"]),
-                    "fonte": fonte,
-                    "route_id": p(r["route_id"]),
-                    "service_id": servico,
-                    "shape_id": p(r["shape_id"]) if r.get("shape_id") else None,
-                    "destino": r.get("trip_headsign", ""),
-                    "sentido": r.get("direction_id", ""),
-                }
-
-        inserir_em_lotes(db.viagens, viagens(), "viagens")
-
-        print("horários (stop_times)... pode demorar")
-
-        def horarios():
-            for r in ler(z, "stop_times.txt"):
-                info = info_viagem.get(r["trip_id"])
-                if not info:
-                    continue
-                chegada, saida = (
-                    segundos(r.get("arrival_time")),
-                    segundos(r.get("departure_time")),
-                )
-                if chegada is None and saida is None:
-                    continue
-                yield {
-                    "fonte": fonte,
-                    "trip_id": p(r["trip_id"]),
-                    "stop_id": p(r["stop_id"]),
-                    "seq": int(r["stop_sequence"]),
-                    "chegada_s": chegada if chegada is not None else saida,
-                    "saida_s": saida if saida is not None else chegada,
-                    "route_id": info[0],
-                    "service_id": info[1],
-                }
-
-        inserir_em_lotes(db.horarios, horarios(), "horarios")
+            for r in ler(z, "trips.txt")
+        }
+        acum = monta_padroes(z, info_viagem, p)
+        docs = (
+            {
+                "fonte": fonte,
+                "route_id": rota,
+                "sentido": sentido,
+                "destino": a["destino"],
+                "shape_id": a["shape_id"],
+                "n_viagens": a["n"],
+                "paradas": list(paradas_),
+                "minutos": [round(x / a["n"] / 60) for x in a["soma"]],
+            }
+            for (rota, sentido, paradas_), a in acum.items()
+        )
+        inserir_em_lotes(db.padroes, docs, "padrões")
+        del acum, info_viagem
 
         print("shapes...")
         pontos = defaultdict(list)
@@ -204,7 +246,7 @@ def importar(fonte: str, caminho: str):
                     float(r["shape_pt_lon"]),
                 )
             )
-        docs = [
+        shapes = [
             {
                 "_id": p(sid),
                 "fonte": fonte,
@@ -212,25 +254,65 @@ def importar(fonte: str, caminho: str):
             }
             for sid, pts in pontos.items()
         ]
-        for i in range(0, len(docs), 500):
-            db.shapes.insert_many(docs[i : i + 500])
-        print(f"  shapes: {len(docs):,}")
+        for i in range(0, len(shapes), 500):
+            db.shapes.insert_many(shapes[i : i + 500])
+        print(f"  shapes: {len(shapes):,}")
+
+        print("tarifas...")
+
+        def numero(txt, tipo=float):
+            try:
+                return tipo(txt.replace(",", "."))
+            except AttributeError, ValueError:
+                return None
+
+        tarifas = [
+            {
+                "_id": p(r["fare_id"]),
+                "fonte": fonte,
+                "preco": numero(r.get("price")),
+                "moeda": r.get("currency_type") or "BRL",
+                "pagamento": r.get(
+                    "payment_method"
+                ),  # "0" = a bordo, "1" = antes de embarcar
+                "baldeacoes": numero(
+                    r.get("transfers"), int
+                ),  # None = ilimitadas (ou não informado)
+                "duracao_baldeacao_s": numero(r.get("transfer_duration"), int),
+                "operadora": agencias.get(r.get("agency_id", ""), unica),
+            }
+            for r in ler(z, "fare_attributes.txt")
+        ]
+        if tarifas:
+            db.tarifas.insert_many(tarifas)
+        print(f"  tarifas: {len(tarifas):,}")
+        regras = (
+            {
+                "fonte": fonte,
+                "fare_id": p(r["fare_id"]),
+                "route_id": p(r["route_id"]) if r.get("route_id") else None,
+                "origem_zona": r.get("origin_id") or None,
+                "destino_zona": r.get("destination_id") or None,
+                "contem_zona": r.get("contains_id") or None,
+            }
+            for r in ler(z, "fare_rules.txt")
+        )
+        inserir_em_lotes(db.regras_tarifa, regras, "regras de tarifa")
 
     print("índices...")
-    db.viagens.create_index("route_id")
-    db.shapes.create_index("fonte")
-    db.horarios.create_index([("stop_id", 1), ("saida_s", 1)])
-    db.horarios.create_index("trip_id")
-    for nome in ("linhas", "paradas", "viagens", "horarios", "calendarios"):
+    for nome in ("linhas", "paradas", "padroes", "shapes", "tarifas", "regras_tarifa"):
         db[nome].create_index("fonte")
     db.linhas.create_index("busca")
     db.linhas.create_index([("tipo", 1), ("numero", 1)])
     db.paradas.create_index("busca")
+    db.padroes.create_index("route_id")
+    db.padroes.create_index("paradas")
+    db.regras_tarifa.create_index("route_id")
+    db.regras_tarifa.create_index("fare_id")
     print("pronto.")
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         sys.exit(__doc__)
-    
     importar(sys.argv[1], sys.argv[2])

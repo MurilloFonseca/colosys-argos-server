@@ -79,12 +79,56 @@ async def shape_da_linha(linha_id: str) -> dict[str, Any]:
 
     if not shape:
         raise HTTPException(404, "Linha sem shape")
-    
+
     return {"pontos": shape["pontos"]}
 
 
+@router.get("/linhas/{linha_id}/paradas")
+async def paradas_da_linha(linha_id: str) -> list[dict[str, Any]]:
+    """Paradas em ordem, por sentido (padrão mais frequente de cada um), com minutos desde a 1ª parada."""
+    padroes: list[dict[str, Any]] = (
+        await db.padroes.find({"route_id": linha_id})
+        .sort("n_viagens", -1)
+        .to_list(None)
+    )
+
+    if not padroes:
+        raise HTTPException(404, "Linha não encontrada ou sem paradas")
+
+    por_sentido: dict[str, dict[str, Any]] = {}
+
+    for d in padroes:
+        por_sentido.setdefault(d["sentido"], d)
+
+    ids: set[dict[str, Any]] = {i for d in por_sentido.values() for i in d["paradas"]}
+    nomes: dict[str, Any] = {
+        p["_id"]: p async for p in db.paradas.find({"_id": {"$in": list(ids)}})
+    }
+
+    return [
+        {
+            "sentido": sentido,
+            "destino": d["destino"],
+            "paradas": [
+                {
+                    "id": i,
+                    "nome": nomes[i]["nome"],
+                    "lat": nomes[i]["lat"],
+                    "lon": nomes[i]["lon"],
+                    "minutos": m,
+                }
+                for i, m in zip(d["paradas"], d["minutos"])
+                if i in nomes
+            ],
+        }
+        for sentido, d in sorted(por_sentido.items())
+    ]
+
+
 @router.get("/buscar")
-async def buscar(q: str = Query(min_length=2), limite: int = Query(10, ge=1, le=30)) -> list[dict[str, Any]]:
+async def buscar(
+    q: str = Query(min_length=2), limite: int = Query(10, ge=1, le=30)
+) -> list[dict[str, Any]]:
     """Sugestões para os campos de busca (linhas + paradas/estações)."""
     rx: dict[str, str] = {"$regex": re.escape(normaliza(q))}
     saida: list[dict[str, Any]] = []
@@ -99,7 +143,7 @@ async def buscar(q: str = Query(min_length=2), limite: int = Query(10, ge=1, le=
                 "operadora": d.get("operadora"),
             }
         )
-    
+
     async for d in db.paradas.find({"busca": rx}).sort("estacao", -1).limit(limite):
         saida.append(
             {
@@ -109,5 +153,5 @@ async def buscar(q: str = Query(min_length=2), limite: int = Query(10, ge=1, le=
                 "tipo": "Estação" if d.get("estacao") else "Parada",
             }
         )
-    
+
     return saida

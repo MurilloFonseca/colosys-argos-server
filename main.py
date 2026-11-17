@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.db import client, criar_indices
 from app.live import loop_trilhos, olho_vivo
-from app.routers import auth, favoritos, linhas, relatos, tempo_real, trajetos
+from app.routers import auth, favoritos, linhas, relatos, tarifas, tempo_real, trajetos
 
 
 @asynccontextmanager
@@ -39,7 +39,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for r in (auth, linhas, trajetos, tempo_real, favoritos, relatos):
+for r in (auth, linhas, trajetos, tarifas, tempo_real, favoritos, relatos):
     app.include_router(r.router)
 
 @app.get("/health", tags=["geral"])
