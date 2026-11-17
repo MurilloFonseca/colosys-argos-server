@@ -135,7 +135,8 @@ def monta_padroes(z, info_viagem, p):
                         "shape_id": info["shape_id"],
                     }
                 else:
-                    assert a["n"] is int and a["soma"] is list
+                    assert type(a["n"]) is int 
+                    assert type(a["soma"]) is list
                     a["n"] += 1
                     a["soma"] = [x + y for x, y in zip(a["soma"], offsets)]
             return acum
