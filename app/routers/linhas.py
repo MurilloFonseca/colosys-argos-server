@@ -16,8 +16,10 @@ def linha_out(d: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
     O status ao vivo só existe para Metrô/Trem cobertos pela API Trilhos."""
     st: str = "Sem dados"
 
-    if d["tipo"] in ("Metrô", "Trem") and d["numero"] in status:
-        st: str = status[d["numero"]]["status"]
+    numero: str = "".join(filter(str.isdigit, d["numero"]))
+
+    if d["tipo"] in ("Metrô", "Trem") and numero in status:
+        st: str = status[numero]["status"]
 
     return {
         "id": d["_id"],
