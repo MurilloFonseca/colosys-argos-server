@@ -51,3 +51,24 @@ async def usuario_atual(
         raise erro
 
     return usuario
+
+
+async def usuario_opcional(
+    cred: HTTPAuthorizationCredentials | None = Depends(bearer),
+) -> dict[str, Any] | None:
+    if not cred:
+        return None
+
+    try:
+        payload: dict[str, Any] = jwt.decode(
+            cred.credentials,
+            settings.jwt_secret,
+            algorithms=["HS256"],
+        )
+
+        usuario = await db.usuarios.find_one({"_id": ObjectId(payload["sub"])})
+
+        return usuario
+
+    except Exception:
+        return None

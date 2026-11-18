@@ -1,8 +1,10 @@
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pymongo.asynchronous.cursor import AsyncCursor
+
+from app.security import usuario_opcional
 
 from ..db import db
 from ..live import mapa_status
@@ -11,7 +13,9 @@ from ..util import normaliza
 router = APIRouter(tags=["linhas"])
 
 
-def linha_out(d: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
+def linha_out(
+    d: dict[str, Any], status: dict[str, Any], favoritos: set[str] | None = None
+) -> dict[str, Any]:
     """Mesmo formato dos objetos `linha` do front (numero, nome, cor, status, tipo, operadora).
     O status ao vivo só existe para Metrô/Trem cobertos pela API Trilhos."""
     st: str = "Sem dados"
@@ -29,6 +33,7 @@ def linha_out(d: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
         "tipo": d["tipo"],
         "operadora": d.get("operadora"),
         "status": st,
+        "favorito": str(d["_id"]) in (favoritos or set()),
     }
 
 
@@ -38,6 +43,7 @@ async def listar_linhas(
     q: str | None = None,
     limite: int = Query(50, ge=1, le=200),
     pular: int = Query(0, ge=0),
+    usuario: dict[str, Any] | None = Depends(usuario_opcional),
 ) -> list[dict[str, Any]]:
     filtro: dict[str, Any] = {}
 
@@ -48,6 +54,19 @@ async def listar_linhas(
         filtro["busca"] = {"$regex": re.escape(normaliza(q))}
 
     status: dict[str, dict[str, Any]] = await mapa_status()
+
+    favoritos: set[str] = set()
+
+    if usuario:
+        cursor_favoritos: AsyncCursor[dict[str, Any]] = db.favoritos.find(
+            {
+                "usuario_id": usuario["_id"],
+                "tipo": "linha",
+            }
+        )
+
+        favoritos: set[str] = {f["linha_id"] async for f in cursor_favoritos}
+
     docs: AsyncCursor[dict[str, Any]] = (
         db.linhas.find(filtro)
         .sort([("tipo", 1), ("numero", 1)])
@@ -55,7 +74,7 @@ async def listar_linhas(
         .limit(limite)
     )
 
-    return [linha_out(d, status) async for d in docs]
+    return [linha_out(d, status, favoritos) async for d in docs]
 
 
 @router.get("/linhas/{linha_id}")
@@ -72,11 +91,11 @@ async def obter_linha(linha_id: str) -> dict[str, Any]:
 async def shape_da_linha(linha_id: str) -> dict[str, Any]:
     """Pontos [lat, lon] para desenhar a linha no Leaflet (uma das viagens da linha)."""
     padrao = (
-            await db.padroes.find({"route_id": linha_id, "shape_id": {"$ne": None}})
-            .sort("n_viagens", -1)
-            .limit(1)
-            .to_list(None)
-        )
+        await db.padroes.find({"route_id": linha_id, "shape_id": {"$ne": None}})
+        .sort("n_viagens", -1)
+        .limit(1)
+        .to_list(None)
+    )
 
     shape = padrao and await db.shapes.find_one({"_id": padrao[0]["shape_id"]})
 
@@ -154,7 +173,7 @@ async def buscar(
                 "id": d["_id"],
                 "nome": d["nome"],
                 "tipo": "Estação" if d.get("estacao") else "Parada",
-                "coord": [d["lat"], d["lon"]]
+                "coord": [d["lat"], d["lon"]],
             }
         )
 
