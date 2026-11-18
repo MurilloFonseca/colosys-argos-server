@@ -154,6 +154,7 @@ async def buscar(
                 "id": d["_id"],
                 "nome": d["nome"],
                 "tipo": "Estação" if d.get("estacao") else "Parada",
+                "coord": [d["lat"], d["lon"]]
             }
         )
 
