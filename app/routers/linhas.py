@@ -71,13 +71,14 @@ async def obter_linha(linha_id: str) -> dict[str, Any]:
 @router.get("/linhas/{linha_id}/shape")
 async def shape_da_linha(linha_id: str) -> dict[str, Any]:
     """Pontos [lat, lon] para desenhar a linha no Leaflet (uma das viagens da linha)."""
-    viagem: dict[str, Any] | None = await db.viagens.find_one(
-        {"route_id": linha_id, "shape_id": {"$ne": None}}
-    )
+    padrao = (
+            await db.padroes.find({"route_id": linha_id, "shape_id": {"$ne": None}})
+            .sort("n_viagens", -1)
+            .limit(1)
+            .to_list(None)
+        )
 
-    shape: dict[str, Any] | None = viagem and await db.shapes.find_one(
-        {"_id": viagem["shape_id"]}
-    )
+    shape = padrao and await db.shapes.find_one({"_id": padrao[0]["shape_id"]})
 
     if not shape:
         raise HTTPException(404, "Linha sem shape")
